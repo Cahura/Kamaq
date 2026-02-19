@@ -1,0 +1,10 @@
+numpy>=1.24.0
+scipy>=1.10.0
+pyyaml>=6.0
+
+# Optional: finance module (prototipo_v4/finanzas/)
+# yfinance>=0.2.0
+# pandas>=2.0.0
+
+# Optional: MNIST experiment (prototipo/prueba_mnist_real.py)
+# scikit-learn>=1.3.0

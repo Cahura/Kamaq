@@ -1,0 +1,65 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Claude Code config
+.claude/
+
+# Null file (Windows artifact)
+nul
+
+# ARC dataset (separate repo, large)
+arc_dataset/
+
+# MNIST data (downloadable)
+mnist_data/
+
+# Empty directories
+memory/
+memory_demo/
+cognitive_core/
+
+# Analysis documents (internal development notes)
+ANALISIS_*.md
+INVESTIGACION_*.md
+PLAN_*.md
+REPORTE_*.md
+RESULTADOS_*.md
+MANIFIESTO_*.md
+VEREDICTO_*.md
+VISION_*.md
+FORMULAS_*.md
+RESUMEN_*.md
+DIAGNOSTICO_*.md
+PREDICCION_*.md
+VALIDACION_*.md
+ARC_CHALLENGE_PLAN.md
+implementation_plan.md.resolved
+
+# Holographic memory data (generated at runtime)
+kamaq_companion/memory/
