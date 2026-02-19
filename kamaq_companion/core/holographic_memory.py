@@ -87,6 +87,10 @@ class HolographicMemory:
         # Suma holográfica para búsqueda rápida
         self.holographic_sum = self._zero_vector()
         
+        # Compositional bag-of-words vectors for similarity-based recall
+        # Regenerated on load (deterministic: same text → same vector)
+        self.key_bag_vectors: Dict[str, np.ndarray] = {}
+        
         # Contadores
         self.total_encodings = 0
         self.total_recalls = 0
@@ -150,6 +154,44 @@ class HolographicMemory:
             return 0.0
         return float(np.dot(a, b) / (norm_a * norm_b))
     
+    def _text_to_bag_vector(self, text: str) -> np.ndarray:
+        """
+        Creates a compositional vector from text using bag-of-words decomposition.
+        
+        Each unique word (>2 chars) maps to a deterministic random vector via
+        SHA-256 seeded generation. The text vector is the normalized sum of
+        its word vectors.
+        
+        Property: texts sharing words have non-zero cosine similarity.
+        "reservoir computing research" and "computing with reservoirs" share
+        "computing" → positive similarity.
+        
+        Limitation: This is NOT semantic similarity. Synonyms ("dog"/"canine"),
+        translations ("perro"/"dog"), or related concepts ("cat"/"dog") produce
+        orthogonal vectors. Real semantic similarity requires trained embeddings
+        from a language model, which is outside this project's scope.
+        
+        Returns:
+            Normalized compositional vector of dimension base_dim
+        """
+        words = text.lower().split()
+        words = [w.strip('.,;:!?()[]{}"\'-_') for w in words]
+        words = [w for w in words if len(w) > 2]
+        
+        if not words:
+            return self._text_to_vector(text)
+        
+        composite = self._zero_vector()
+        for word in set(words):  # set() to avoid double-counting repeated words
+            word_vec = self._text_to_vector(word)
+            composite += word_vec
+        
+        norm = np.linalg.norm(composite)
+        if norm < 1e-10:
+            return self._text_to_vector(text)
+        
+        return composite / norm
+    
     # ==========================================================================
     # OPERACIONES DE MEMORIA
     # ==========================================================================
@@ -200,6 +242,9 @@ class HolographicMemory:
         )
         self.trace_index[key] = trace
         
+        # Store compositional vector for similarity-based recall
+        self.key_bag_vectors[key] = self._text_to_bag_vector(key)
+        
         self.total_encodings += 1
         return True
     
@@ -208,31 +253,40 @@ class HolographicMemory:
                threshold: float = 0.3,
                max_results: int = 5) -> RecallResult:
         """
-        Recupera memoria asociada a query.
+        Retrieves memory associated with a query using multiple strategies.
         
-        Nota: La recuperación actual usa búsqueda de texto (substring +
-        palabras clave), NO los vectores HRR almacenados. Los vectores
-        holográficos se codifican correctamente en encode() pero el
-        recall semántico basado en ellos no está implementado aún.
+        Strategies (in priority order):
+        1. Exact key match in trace_index (O(1), perfect confidence)
+        2. HRR unbinding from holographic trace (mathematical recall via
+           circular correlation — the core HRR operation)
+        3. Bag-of-words vector similarity (compositional vectors that capture
+           word overlap between query and stored keys)
+        4. Text-based fallback (substring + keyword intersection for cases
+           where vector methods miss due to short queries or special characters)
         
-        Estrategias actuales:
-        1. Match exacto en trace_index
-        2. Substring matching
-        3. Similitud de palabras clave (Jaccard)
+        The result combines all strategies and returns the best match by
+        confidence score.
+        
+        Honest notes:
+        - Strategy 2 (HRR unbinding) works for exact key matches but degrades
+          with many stored items due to cross-talk noise. SNR ~ sqrt(D/N).
+        - Strategy 3 (bag similarity) captures word overlap, NOT semantic meaning.
+          "dog" and "canine" produce orthogonal vectors — real semantic similarity
+          requires trained embeddings from a language model.
+        - Strategy 4 (text fallback) is a pragmatic safety net, not a principled
+          retrieval method.
         
         Args:
-            query: Consulta de memoria
-            threshold: Umbral mínimo de similitud
-            max_results: Máximo de resultados relacionados
+            query: Memory query string
+            threshold: Minimum similarity threshold (0.0 to 1.0)
+            max_results: Maximum number of related memories to return
             
         Returns:
-            RecallResult con memoria encontrada
+            RecallResult with the best matching memory
         """
         self.total_recalls += 1
-        query_lower = query.lower()
-        query_words = set(query_lower.split())
         
-        # Buscar match directo en índice
+        # Strategy 1: Exact key match (O(1), always reliable)
         if query in self.trace_index:
             trace = self.trace_index[query]
             trace.access_count += 1
@@ -245,40 +299,17 @@ class HolographicMemory:
                 related_memories=[]
             )
         
-        # Búsqueda por múltiples criterios
+        # Collect candidates from all strategies
         candidates = []
-        for key, trace in self.trace_index.items():
-            key_lower = key.lower()
-            content_lower = trace.content.lower()
-            key_words = set(key_lower.split())
-            
-            score = 0.0
-            
-            # Criterio 1: Query contenido en key
-            if query_lower in key_lower:
-                score += 0.8
-            
-            # Criterio 2: Key contenido en query
-            if key_lower in query_lower:
-                score += 0.7
-            
-            # Criterio 3: Palabras comunes
-            common_words = query_words & key_words
-            if common_words:
-                word_score = len(common_words) / max(len(query_words), len(key_words))
-                score += word_score * 0.6
-            
-            # Criterio 4: Query en contenido
-            if query_lower in content_lower:
-                score += 0.5
-            
-            # Criterio 5: Palabras en contenido
-            words_in_content = sum(1 for w in query_words if w in content_lower and len(w) > 3)
-            if words_in_content:
-                score += words_in_content * 0.1
-            
-            if score >= threshold:
-                candidates.append((min(1.0, score), key, trace))
+        
+        # Strategy 2: HRR unbinding
+        candidates.extend(self._recall_via_hrr(query))
+        
+        # Strategy 3: Bag-of-words vector similarity
+        candidates.extend(self._recall_via_bag_similarity(query, threshold))
+        
+        # Strategy 4: Text-based fallback
+        candidates.extend(self._recall_via_text(query, threshold))
         
         if not candidates:
             return RecallResult(
@@ -290,22 +321,171 @@ class HolographicMemory:
                 related_memories=[]
             )
         
-        # Ordenar por score
-        candidates.sort(reverse=True, key=lambda x: x[0])
+        # Deduplicate by key, keeping highest confidence per key
+        best_by_key: Dict[str, float] = {}
+        for confidence, key, _strategy in candidates:
+            if key not in best_by_key or confidence > best_by_key[key]:
+                best_by_key[key] = confidence
         
-        best = candidates[0]
-        related = [c[1] for c in candidates[1:max_results]]
+        # Sort by confidence descending
+        sorted_keys = sorted(
+            best_by_key.items(), key=lambda x: x[1], reverse=True
+        )
         
-        best[2].access_count += 1
+        # Best match
+        best_key, best_confidence = sorted_keys[0]
+        best_trace = self.trace_index[best_key]
+        best_trace.access_count += 1
+        
+        # Related memories (next best matches)
+        related = [k for k, _ in sorted_keys[1:max_results + 1]]
         
         return RecallResult(
             found=True,
-            key=best[1],
-            content=best[2].content,
-            confidence=best[0],
-            memory_type=best[2].memory_type,
+            key=best_key,
+            content=best_trace.content,
+            confidence=min(1.0, best_confidence),
+            memory_type=best_trace.memory_type,
             related_memories=related
         )
+    
+    # ==========================================================================
+    # RECALL STRATEGIES (each returns List[Tuple[confidence, key, strategy]])
+    # ==========================================================================
+    
+    def _recall_via_hrr(self, query: str) -> List[Tuple[float, str, str]]:
+        """
+        HRR recall via circular correlation (unbinding).
+        
+        Mathematics: Given the holographic trace T = sum(key_i (x) content_i),
+        correlate(T, query_key) ~ content_if_matching + noise_from_other_items
+        
+        We reconstruct T from individual bindings (memory_bank) rather than using
+        holographic_sum, because holographic_sum is normalized after each addition
+        which distorts the superposition and degrades unbinding accuracy.
+        
+        The decoded vector is compared against each stored content vector to
+        identify the best match. This comparison is necessary because the decoded
+        signal contains noise from non-matching bindings.
+        
+        Complexity: O(N * D) where N = number of memories, D = vector dimension.
+        
+        Returns:
+            List of (confidence, key, "hrr_unbinding") tuples
+        """
+        if not self.memory_bank or not self.trace_index:
+            return []
+        
+        query_vec = self._text_to_vector(query)
+        
+        # Reconstruct raw holographic trace from individual bindings
+        # (avoids normalization distortion in holographic_sum)
+        raw_trace = self._zero_vector()
+        for bound_vec in self.memory_bank.values():
+            raw_trace += bound_vec
+        
+        # Unbind: attempt to recover content vector associated with query key
+        decoded = self._circular_correlate(raw_trace, query_vec)
+        
+        # Compare decoded signal against each known content vector
+        candidates = []
+        for key, trace in self.trace_index.items():
+            content_vec = self._text_to_vector(trace.content)
+            sim = self._similarity(decoded, content_vec)
+            
+            # HRR unbinding produces noisy similarities.
+            # Noise std ≈ sqrt(N/D). For N=10, D=1024: std ≈ 0.10.
+            # Threshold at ~1.5 std to reject most noise matches.
+            if sim > 0.15:
+                # Scale: HRR similarities are inherently low due to cross-talk
+                confidence = min(1.0, max(0.0, sim * 2.5))
+                candidates.append((confidence, key, "hrr_unbinding"))
+        
+        return candidates
+    
+    def _recall_via_bag_similarity(self, query: str,
+                                    threshold: float) -> List[Tuple[float, str, str]]:
+        """
+        Recall using bag-of-words compositional vector similarity.
+        
+        Creates a compositional vector from the query's words and compares it
+        against stored key vectors using cosine similarity.
+        
+        This captures word overlap: if the query and a stored key share words,
+        their bag vectors will have positive cosine similarity.
+        
+        Limitation: Does NOT capture semantic similarity. Synonyms, translations,
+        and conceptually related terms produce orthogonal vectors because they
+        hash to different random vectors.
+        
+        Returns:
+            List of (confidence, key, "bag_similarity") tuples
+        """
+        if not self.key_bag_vectors:
+            return []
+        
+        query_bag = self._text_to_bag_vector(query)
+        
+        candidates = []
+        for key, key_bag in self.key_bag_vectors.items():
+            sim = self._similarity(query_bag, key_bag)
+            if sim > threshold:
+                candidates.append((sim, key, "bag_similarity"))
+        
+        return candidates
+    
+    def _recall_via_text(self, query: str,
+                         threshold: float) -> List[Tuple[float, str, str]]:
+        """
+        Text-based recall using substring and keyword matching.
+        
+        This is the least mathematically principled strategy but serves as a
+        pragmatic fallback for cases where vector methods fail:
+        - Very short queries (1-2 chars) that produce degenerate bag vectors
+        - Queries with special characters stripped during tokenization
+        - Partial key matches where substring containment is the right signal
+        
+        Returns:
+            List of (confidence, key, "text_fallback") tuples
+        """
+        query_lower = query.lower()
+        query_words = set(query_lower.split())
+        
+        candidates = []
+        for key, trace in self.trace_index.items():
+            key_lower = key.lower()
+            content_lower = trace.content.lower()
+            key_words = set(key_lower.split())
+            
+            score = 0.0
+            
+            # Substring containment
+            if query_lower in key_lower:
+                score += 0.8
+            if key_lower in query_lower:
+                score += 0.7
+            
+            # Word intersection (Jaccard-inspired)
+            common_words = query_words & key_words
+            if common_words:
+                word_score = len(common_words) / max(len(query_words), len(key_words))
+                score += word_score * 0.6
+            
+            # Query found in content
+            if query_lower in content_lower:
+                score += 0.5
+            
+            # Significant words in content
+            words_in_content = sum(
+                1 for w in query_words if w in content_lower and len(w) > 3
+            )
+            if words_in_content:
+                score += words_in_content * 0.1
+            
+            if score >= threshold:
+                candidates.append((min(1.0, score), key, "text_fallback"))
+        
+        return candidates
     
     def recall_by_type(self, 
                        memory_type: str, 
@@ -457,6 +637,10 @@ class HolographicMemory:
                     index_data = json.load(f)
                 for key, trace_dict in index_data.items():
                     self.trace_index[key] = MemoryTrace(**trace_dict)
+                
+                # Regenerate bag vectors (deterministic, no persistence needed)
+                for key in self.trace_index:
+                    self.key_bag_vectors[key] = self._text_to_bag_vector(key)
             
             # Cargar metadatos
             if meta_file.exists():
@@ -496,7 +680,9 @@ class HolographicMemory:
             "total_recalls": self.total_recalls,
             "session_count": self.session_count,
             "memory_size_kb": memory_size_bytes / 1024,
-            "holographic_norm": float(np.linalg.norm(self.holographic_sum))
+            "holographic_norm": float(np.linalg.norm(self.holographic_sum)),
+            "bag_vectors_cached": len(self.key_bag_vectors),
+            "recall_strategies": ["exact_match", "hrr_unbinding", "bag_similarity", "text_fallback"]
         }
     
     def __repr__(self) -> str:

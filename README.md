@@ -475,17 +475,18 @@ I believe in transparency. Here's what this project **is** and **isn't:**
 
 ### What it is NOT
 - ❌ Not a novel research contribution — all components implement known techniques
-- ❌ Not production-ready — experimental code, no proper test suite, no logging framework
+- ❌ Not production-ready — experimental code with basic test suite (`tests/`), no logging framework
 - ❌ Not a "cognitive architecture" in the AGI sense — it's numerical simulations
 - ❌ Not using cloud LLM APIs (Claude, GPT, Gemini) — only local models via Ollama
 - ❌ Not solving ARC with biological inspiration — the ARC solver uses conventional transforms
 
 ### Known Gaps
-- The companion's holographic recall falls back to substring matching (encoding is correct)
+- Holographic recall now uses 4 strategies (HRR unbinding, bag-of-words similarity, text fallback) — but bag-of-words captures word overlap only, NOT semantic similarity (requires trained embeddings)
 - Tool dispatch in the agent is regex-based, not proper function-calling protocol
 - Active inference engine is tabular, not scalable to large state spaces
 - Neurogenesis uses O(N²) matrix reallocation on each expansion
 - No automatic feedback loop for confidence calibration (outcome recording is manual)
+- See [LESSONS_LEARNED.md](LESSONS_LEARNED.md) for detailed technical reflections
 
 ---
 
